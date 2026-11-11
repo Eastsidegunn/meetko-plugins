@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Write index.json (the list meetko's plugin browser reads) from the plugin folders here.
+
+    python3.11 -I tools/make-index            # writes index.json at the repo root
+    python3.11 -I tools/make-index --check    # exit 1 if index.json differs (ignores "generated")
+
+Each top-level folder with a meetko.toml is a plugin. The manifest gives the id, name, version,
+description, license, runtime and declared permissions. Where the plugin is downloaded from is NOT
+in the manifest: meetko installs `github:OWNER/REPO@REF`, takes `meetko.toml` from the ROOT of that
+repository at a pinned 40-character commit sha, and requires the id's publisher part to equal OWNER.
+So a plugin gets an index entry only when `sources.json` names its published repository:
+
+    {"summary-py": {"repo": "OWNER/REPO", "ref": "v0.1.0", "sha": "<40 hex>", "updated": ""}}
+
+Plugins without a source, or whose source would be refused at install, are skipped with a reason.
+Stdlib only; Python 3.11 or newer (tomllib). Nothing here touches the network.
+"""
+
+from __future__ import annotations
+
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit(f"make-index needs Python 3.11 or newer (this is {sys.version_info.major}.{sys.version_info.minor})")
+
+import argparse
+import json
+import re
+import tomllib
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+ID_RE = re.compile(r"^([a-z0-9][a-z0-9_.-]{0,63})/([a-z0-9][a-z0-9_.-]{0,63})$")
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}$")
+
+
+class Skip(Exception):
+    pass
+
+
+def runtime(command: list[str]) -> str:
+    prog = command[0].replace("\\", "/")
+    if "/" in prog:
+        return "binary"
+    name = prog.lower()
+    if name.startswith("python"):
+        return "python"
+    if name in ("node", "deno", "bun"):
+        return "node"
+    if name in ("sh", "bash", "zsh"):
+        return "shell"
+    return name[:32]
+
+
+def facts(dir: Path) -> dict:
+    m = tomllib.loads((dir / "meetko.toml").read_text(encoding="utf-8"))
+    pkg, run = m.get("package", {}), m.get("run", {})
+    pid, version = pkg.get("id", ""), pkg.get("version", "")
+    if not ID_RE.match(pid):
+        raise Skip(f"package.id {pid!r} is not publisher/name")
+    if not VERSION_RE.match(version):
+        raise Skip(f"package.version {version!r} is not semver")
+    if not pkg.get("description"):
+        raise Skip("package.description is required")
+    command = run.get("command")
+    command = [command] if isinstance(command, str) else command
+    if not command:
+        raise Skip("run.command is missing")
+    if "/" in command[0] and not (dir / command[0]).is_file():
+        # meetko never builds at install time: a compiled plugin must commit its binary
+        raise Skip(f"run.command {command[0]!r} is not in the folder (a compiled plugin must commit its built binary)")
+    perm = m.get("permissions", {})
+    permissions = {"network": bool(perm.get("network", False)), "audio": m.get("input", {}).get("audio", "none") == "full"}
+    for k in ("secrets", "settings"):
+        if perm.get(k):
+            permissions[k] = list(perm[k])
+    return {
+        "id": pid,
+        "name": pid.split("/", 1)[1],
+        "version": version,
+        "description": pkg["description"].strip(),
+        "permissions": permissions,
+        "runtime": runtime(command),
+        "license": pkg.get("license", ""),
+        "homepage": pkg.get("homepage", ""),
+    }
+
+
+def entry(name: str, f: dict, src: dict | None) -> dict:
+    if not src:
+        raise Skip("no published repository in sources.json (meetko installs a plugin from the root of its own repo)")
+    repo, ref, sha = src.get("repo", ""), src.get("ref", ""), src.get("sha", "")
+    if not REPO_RE.match(repo) or not SHA_RE.match(sha) or not ref:
+        raise Skip("sources.json needs repo OWNER/REPO, ref and a 40-character commit sha")
+    owner = repo.split("/")[0].lower()
+    if f["id"].split("/")[0] != owner:
+        raise Skip(f"id {f['id']!r}: the publisher part must be the repo owner {owner!r}, or install from GitHub is refused")
+    e = {
+        "id": f["id"], "name": f["name"], "version": f["version"], "description": f["description"],
+        "repo": repo, "ref": ref, "sha": sha, "permissions": f["permissions"], "runtime": f["runtime"],
+        "license": f["license"], "stars": 0, "updated": src.get("updated", ""),
+    }
+    if f["homepage"].startswith("https://"):
+        e["homepage"] = f["homepage"]
+    return e
+
+
+def build() -> tuple[dict, list[str]]:
+    sources_path = ROOT / "sources.json"
+    sources = json.loads(sources_path.read_text(encoding="utf-8")) if sources_path.exists() else {}
+    plugins, notes, seen = [], [], set()
+    for dir in sorted(p for p in ROOT.iterdir() if (p / "meetko.toml").is_file()):
+        try:
+            e = entry(dir.name, facts(dir), sources.get(dir.name))
+            if e["id"] in seen:
+                raise Skip(f"id {e['id']} is listed twice")
+            seen.add(e["id"])
+            plugins.append(e)
+        except Skip as why:
+            notes.append(f"skip {dir.name}: {why}")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"generated": stamp, "plugins": plugins}, notes
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--out", default=str(ROOT / "index.json"))
+    ap.add_argument("--check", action="store_true", help="compare with --out instead of writing it")
+    a = ap.parse_args()
+    doc, notes = build()
+    for n in notes:
+        print(n, file=sys.stderr)
+    out = Path(a.out)
+    if a.check:
+        old = json.loads(out.read_text(encoding="utf-8"))
+        same = old.get("plugins") == doc["plugins"]
+        print("index.json is up to date" if same else "index.json is out of date: run tools/make-index", file=sys.stderr)
+        return 0 if same else 1
+    out.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {out.name}: {len(doc['plugins'])} plugin(s)", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
