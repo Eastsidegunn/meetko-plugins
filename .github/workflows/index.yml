@@ -2,7 +2,7 @@
 # tools/build_index.py and index.schema.json are copies of the same folder; update them together).
 #
 # When sources.json changes on main (a merged listing PR) and once a day, it rebuilds index.json from
-# the plugins named in sources.json (a repo, optionally a folder in it, optionally a pinned tag),
+# the plugins named in sources.json (a repo, optionally a folder in it, and a pinned ref: required except for this repo's own rows),
 # pins each to a commit sha, and commits the file when it changed. The topic search
 # (`meetko-plugin`) is off here (`--no-search`): plugins are listed by pull request. The app reads the file from
 #   https://raw.githubusercontent.com/Eastsidegunn/meetko-plugins/main/index.json

@@ -10,12 +10,13 @@
 4. 이 저장소에 **PR**을 보내 `sources.json`의 `plugins`에 한 줄을 더합니다.
 
    ```json
-   {"repo": "alice/meetko-summary"}
+   {"repo": "alice/meetko-summary", "ref": "v1.0.0"}
    {"repo": "alice/my-plugins", "path": "summary", "ref": "v1.0.0"}
    ```
 
-   `path`는 저장소 안 폴더(없으면 루트), `ref`는 고정할 태그(없으면 최신 release, 그것도 없으면 기본 브랜치)입니다.
-5. PR에서는 `tools/make-index`가 형식만 확인합니다. 합쳐지면 `.github/workflows/index.yml`이 각 항목의 매니페스트를 GitHub에서 그 커밋 그대로 읽어 `index.json`을 다시 만들고 커밋 sha에 고정합니다.
+   `path`는 저장소 안 폴더(없으면 루트)입니다. **`ref`(release 태그 또는 40자 커밋 sha)는 꼭 적어야 합니다.** 목록이 PR에서 본 버전에 묶이도록, 기본 브랜치를 따라가는 줄은 받지 않습니다(이 저장소의 공식 예제 줄만 예외). 새 버전은 `ref`를 바꾸는 PR로 올립니다.
+   설치 한도(내려받는 크기 25MB, 압축 푼 크기 100MB, 항목 5000개)는 폴더가 아니라 저장소 전체에 적용되므로, 아주 큰 저장소 안의 폴더는 설치할 수 없습니다.
+5. PR에서는 `tools/make-index`가 형식만 확인합니다(이 저장소의 폴더는 앱의 설치 규칙도: 심볼릭 링크·서브모듈 금지, 이식 가능한 파일 이름, 깊이 32, 크기·항목 한도). 합쳐지면 `.github/workflows/index.yml`이 각 항목의 매니페스트를 GitHub에서 그 커밋 그대로 읽어 `index.json`을 다시 만들고 커밋 sha에 고정합니다.
 
 목록에 오른다는 것은 **형식이 맞다**는 뜻일 뿐이고, 코드를 검토했다는 뜻이 아닙니다. 게시와 설치 규칙 전체는 meetko의 [docs/plugin-publishing.md](https://github.com/Eastsidegunn/meetko/blob/main/docs/plugin-publishing.md), 격리(샌드박스)는 [docs/plugin-security.md](https://github.com/Eastsidegunn/meetko/blob/main/docs/plugin-security.md)를 보세요. 문제가 있는 플러그인은 이 저장소의 issue로 알려 주세요.
 
@@ -66,7 +67,7 @@ python3 -I summary-py/test_summary.py                # 네트워크 없음 (127.
 
 The catalog for [meetko](https://github.com/Eastsidegunn/meetko) plugins: the app's plugin browser reads this repo's `index.json`, and the official examples live here as folders.
 
-**Get your plugin listed:** publish it in your own public GitHub repo (`meetko.toml` at the root or in a folder; the id's publisher part is your GitHub owner name in lowercase; nothing is built at install, so commit binaries for compiled plugins), tag a release, and open a pull request adding a row to `sources.json` (`{"repo": "OWNER/REPO"}`, plus `"path": "FOLDER"` for a subfolder and optionally `"ref": "TAG"`). `tools/make-index` checks the row in the PR; after the merge, `.github/workflows/index.yml` reads each manifest from GitHub and rebuilds `index.json`, pinned to commits. Being listed means the format is right, not that the code was reviewed. See meetko's `docs/plugin-publishing.md`.
+**Get your plugin listed:** publish it in your own public GitHub repo (`meetko.toml` at the root or in a folder; the id's publisher part is your GitHub owner name in lowercase; nothing is built at install, so commit binaries for compiled plugins), tag a release, and open a pull request adding a row to `sources.json` (`{"repo": "OWNER/REPO", "ref": "v1.0.0"}`, plus `"path": "FOLDER"` for a subfolder). The `ref` (a release tag or a full commit sha) is required, so the listing stays on the version reviewed in the PR; only this repo's own example rows follow `main`. The app's download caps apply to the whole repository archive, so a folder in a very large repo cannot be installed. `tools/make-index` checks the row in the PR (and, for this repo's folders, the app's install rules); after the merge, `.github/workflows/index.yml` reads each manifest from GitHub and rebuilds `index.json`, pinned to commits. Being listed means the format is right, not that the code was reviewed. See meetko's `docs/plugin-publishing.md`.
 
 **Official examples:** `eastsidegunn/action-items-py` (rule-based action items, no network), `eastsidegunn/summary-py` (AI summary; **uses the network** and sends the transcript text to the AI service you configure with `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`/`OPENAI_BASE_URL`), and `eastsidegunn/talk-time-rs` (talk time per speaker, a Rust binary; not listed because it must be built, so build it with `cargo build --release --locked` and `meetko plugin add` the folder). Install the listed ones from the app or with `meetko plugin install github:Eastsidegunn/meetko-plugins/FOLDER@main`.
 

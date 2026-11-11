@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
 """Check sources.json and this repo's plugin folders, or write index.json for them offline.
 
-    python3.12 -I tools/make-index                 # check (what a listing PR must pass); writes nothing
-    python3.12 -I tools/make-index --sha COMMIT    # write index.json for this repo's folders at COMMIT
+    python3.12 -I tools/make-index                 # check HEAD (what a listing PR must pass); writes nothing
+    python3.12 -I tools/make-index --sha COMMIT    # check COMMIT, then write index.json for this repo's folders
 
 sources.json lists what the app's browser shows: {"plugins": [{"repo": "OWNER/REPO", "path": "FOLDER"
-(optional), "ref": "TAG" (optional)}], "unlisted": {"FOLDER": "why"}}. The normal way index.json is made is
-the GitHub workflow (.github/workflows/index.yml), which runs tools/build_index.py against GitHub and pins
-every entry, including other people's repositories, to a commit. This script needs no network:
+(optional), "ref": "TAG or COMMIT" (required except for this repo's own rows)}], "unlisted": {"FOLDER": "why"}}.
+The normal way index.json is made is the GitHub workflow (.github/workflows/index.yml), which runs
+tools/build_index.py against GitHub and pins every entry, including other people's repositories, to a
+commit. This script needs no network and looks only at a commit (HEAD by default), the same tree
+`git archive` makes and the app downloads:
 
-- check: every row is well formed (the same rules as tools/build_index.py and the app); every row for this
-  repository names a folder whose meetko.toml passes the same manifest checks, whose id publisher is the
-  repo owner, and whose command needs no build; every plugin folder here is either listed or in "unlisted".
-- --sha: index entries for this repository's rows, with manifests read from COMMIT (`git show`, the bytes
-  the archive of that commit holds; there is no .gitattributes export-subst here). COMMIT must be on the
-  GitHub default branch before the index is published, or installs are refused. Rows for other
-  repositories are kept from the current index.json (the workflow makes them).
+- every sources row is well formed (the same rules as tools/build_index.py and the app; third-party rows
+  need a ref);
+- the whole archive stays under the app's caps (download 25 MB, 100 MB unpacked, 5000 entries), which
+  apply to the entire repository even when one folder is installed;
+- every row for this repository names a folder whose files the app would install: no symlinks or
+  submodules, every name portable (no Windows device names, trailing dot or space, \\ : * ? " < > |,
+  control characters), at most 32 levels deep; its meetko.toml passes the manifest checks, the id's
+  publisher is the repo owner, and a command path is a committed file (nothing is built at install);
+- every plugin folder here is either listed or in "unlisted".
+
+With --sha it then writes index entries for this repository's rows at that commit. COMMIT must be on the
+GitHub default branch before the index is published, or installs are refused. Rows for other
+repositories are kept from the current index.json (the workflow makes them).
 
 Stdlib only; Python 3.11 or newer (tomllib, via tools/build_index.py, a copy of meetko's
 tools/plugin-index/build_index.py).
@@ -31,6 +39,7 @@ if sys.version_info < (3, 11):
 import argparse
 import json
 import subprocess
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,64 +49,120 @@ sys.path.insert(0, str(ROOT / "tools"))  # -I drops the script dir from sys.path
 import build_index as bi  # noqa: E402
 
 THIS_REPO = "Eastsidegunn/meetko-plugins"
-
-
-def local(row: dict) -> bool:
-    return row["repo"].lower() == THIS_REPO.lower()
-
-
-def facts(text: str, folder: str, owner: str, at: str | None = None) -> dict:
-    """Manifest facts; a command path must be a file Git tracks (in the index, or at commit `at`):
-    a build output that is only on this disk is not in the archive users install."""
-    f = bi.validate_manifest(text, owner)
-    command = bi.tomllib.loads(text)["run"]["command"]
-    prog = (command if isinstance(command, list) else [command])[0].replace("\\", "/")
-    if "/" in prog:
-        path = f"{folder}/{prog}"
-        tracked = git("ls-tree", "--name-only", at, path) if at else git("ls-files", "--", path)
-        if not tracked.strip():
-            raise bi.Rejected(f"run.command {prog!r} is not a committed file: a compiled plugin must commit its binary (meetko never builds at install)")
-    return f
-
-
-def check() -> tuple[list[dict], list[str]]:
-    doc = json.loads((ROOT / "sources.json").read_text(encoding="utf-8"))
-    rows = bi.load_sources(json.dumps({"plugins": doc.get("plugins")}))
-    unlisted = doc.get("unlisted", {})
-    if not isinstance(unlisted, dict) or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in unlisted.items()):
-        raise bi.FetchFailed('"unlisted" must map a folder name to the reason it is not listed')
-    errs = []
-    for r in rows:
-        if not local(r):
-            continue
-        if not r["path"]:
-            errs.append(f"{r['repo']}: the repository root is not a plugin; name a folder")
-            continue
-        folder = ROOT / r["path"]
-        try:
-            facts((folder / "meetko.toml").read_text(encoding="utf-8"), r["path"], THIS_REPO.split("/")[0])
-        except FileNotFoundError:
-            errs.append(f"{r['path']}: no meetko.toml")
-        except bi.Rejected as e:
-            errs.append(f"{r['path']}: {e}")
-    listed = {r["path"] for r in rows if local(r)}
-    for d in sorted(p for p in ROOT.iterdir() if (p / "meetko.toml").is_file()):
-        if d.name in listed and d.name in unlisted:
-            errs.append(f"{d.name}: both listed and unlisted")
-        elif d.name not in listed and d.name not in unlisted:
-            errs.append(f"{d.name}: a plugin folder that is neither in sources.json plugins nor in unlisted")
-    return rows, errs
+# the app's extraction caps (crates/meetko-core/src/plugin_source.rs)
+MAX_DOWNLOAD = 25 * 1024 * 1024
+MAX_EXTRACTED = 100 * 1024 * 1024
+MAX_ENTRIES = 5000
+MAX_DEPTH = 32
 
 
 def git(*args: str) -> str:
     return subprocess.run(["git", "-C", str(ROOT), *args], check=True, capture_output=True, text=True).stdout
 
 
-def write(rows: list[dict], sha: str, ref: str, out: Path) -> list[str]:
-    sha = git("rev-parse", "--verify", f"{sha}^{{commit}}").strip()
-    if git("ls-tree", "--name-only", sha, ".gitattributes").strip():
+def local(row: dict) -> bool:
+    return row["repo"].lower() == THIS_REPO.lower()
+
+
+def portable_name(part: str) -> bool:
+    """crates/meetko-core/src/plugin_source.rs portable_name"""
+    if not part or part.endswith((".", " ")) or any(unicodedata.category(c) == "Cc" or c in '\\:*?"<>|' for c in part):
+        return False
+    stem = part.split(".")[0].rstrip(" ").upper()
+    numbered = any(stem.startswith(p) and len(stem) == 4 and (stem[3].isdigit() or stem[3] in "¹²³") for p in ("COM", "LPT"))
+    return not (stem in ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$") or numbered)
+
+
+def tree(commit: str) -> list[tuple[str, str, int, str]]:
+    """(mode, type, size, path) of every entry at `commit`, folders included"""
+    out = []
+    for rec in git("ls-tree", "-r", "-t", "-l", "-z", commit).split("\0"):
+        if not rec:
+            continue
+        meta, path = rec.split("\t", 1)
+        mode, kind, _obj, size = meta.split()
+        out.append((mode, kind, int(size) if size.isdigit() else 0, path))
+    return out
+
+
+def archive_problems(commit: str, entries: list) -> list[str]:
+    errs = []
+    if len(entries) + 2 > MAX_ENTRIES:  # + the top folder and the pax header git writes
+        errs.append(f"the repository archive has {len(entries)} entries; the app refuses more than {MAX_ENTRIES}")
+    total = sum(size for _, kind, size, _ in entries if kind == "blob")
+    if total > MAX_EXTRACTED:
+        errs.append(f"the repository unpacks to {total} bytes; the app refuses more than {MAX_EXTRACTED}")
+    gz = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar.gz", commit], check=True, capture_output=True).stdout
+    if len(gz) > MAX_DOWNLOAD:
+        errs.append(f"the repository archive is {len(gz)} bytes compressed; the app refuses more than {MAX_DOWNLOAD}")
+    return errs
+
+
+def folder_problems(folder: str, entries: list) -> list[str]:
+    errs, prefix = [], folder + "/"
+    for mode, kind, _size, path in entries:
+        if not path.startswith(prefix):
+            continue
+        rel = path[len(prefix):]
+        if mode == "120000":
+            errs.append(f"{path}: a symlink (the app installs regular files and folders only)")
+        elif kind == "commit":
+            errs.append(f"{path}: a submodule (git archive leaves it empty)")
+        if not all(portable_name(p) for p in rel.split("/")):
+            errs.append(f"{path}: a name the app refuses (reserved Windows name, trailing dot or space, or \\ : * ? \" < > | or a control character)")
+        if len(rel.split("/")) > MAX_DEPTH:
+            errs.append(f"{path}: deeper than {MAX_DEPTH} levels")
+    return errs
+
+
+def facts(text: str, folder: str, owner: str, files: set[str]) -> dict:
+    f = bi.validate_manifest(text, owner)
+    command = bi.tomllib.loads(text)["run"]["command"]
+    prog = (command if isinstance(command, list) else [command])[0].replace("\\", "/")
+    if "/" in prog and f"{folder}/{prog}" not in files:
+        raise bi.Rejected(f"run.command {prog!r} is not a committed file: a compiled plugin must commit its binary (meetko never builds at install)")
+    return f
+
+
+def check(commit: str) -> tuple[list[dict], list[str]]:
+    doc = json.loads(git("show", f"{commit}:sources.json"))
+    rows = bi.load_sources(json.dumps({"plugins": doc.get("plugins")}), THIS_REPO)
+    unlisted = doc.get("unlisted", {})
+    if not isinstance(unlisted, dict) or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in unlisted.items()):
+        raise bi.FetchFailed('"unlisted" must map a folder name to the reason it is not listed')
+    entries = tree(commit)
+    files = {p for _, kind, _, p in entries if kind == "blob"}
+    errs = archive_problems(commit, entries)
+    owner = THIS_REPO.split("/")[0]
+    for r in rows:
+        if not local(r):
+            continue
+        if not r["path"]:
+            errs.append(f"{r['repo']}: the repository root is not a plugin; name a folder")
+            continue
+        if f"{r['path']}/meetko.toml" not in files:
+            errs.append(f"{r['path']}: no meetko.toml")
+            continue
+        errs += folder_problems(r["path"], entries)
+        try:
+            facts(git("show", f"{commit}:{r['path']}/meetko.toml"), r["path"], owner, files)
+        except bi.Rejected as e:
+            errs.append(f"{r['path']}: {e}")
+    listed = {r["path"] for r in rows if local(r)}
+    folders = sorted(p.rsplit("/", 1)[0] for p in files if p.endswith("/meetko.toml"))
+    for d in folders:
+        if d in listed and d in unlisted:
+            errs.append(f"{d}: both listed and unlisted")
+        elif d not in listed and d not in unlisted:
+            errs.append(f"{d}: a plugin folder that is neither in sources.json plugins nor in unlisted")
+    return rows, errs
+
+
+def write(rows: list[dict], commit: str, ref: str, out: Path) -> list[str]:
+    if git("ls-tree", "--name-only", commit, ".gitattributes").strip():
         raise SystemExit(".gitattributes exists at that commit: export-subst could change the archive; use the workflow")
     owner = THIS_REPO.split("/")[0]
+    files = {p for _, kind, _, p in tree(commit) if kind == "blob"}
     meta = {"full_name": THIS_REPO, "stargazers_count": 0, "pushed_at": ""}
     old = json.loads(out.read_text(encoding="utf-8")).get("plugins", []) if out.exists() else []
     plugins, notes = [], []
@@ -107,29 +172,28 @@ def write(rows: list[dict], sha: str, ref: str, out: Path) -> list[str]:
             plugins += kept
             notes.append(f"{bi.where(r)}: {'kept from the current index' if kept else 'not in the current index; the workflow adds it'}")
             continue
-        try:
-            text = git("show", f"{sha}:{r['path']}/meetko.toml")
-            plugins.append(bi.make_entry(meta, r["ref"] or ref, sha, facts(text, r["path"], owner, sha), r["path"]))
-        except subprocess.CalledProcessError:
-            raise SystemExit(f"{r['path']}: no meetko.toml at {sha}") from None
-        except bi.Rejected as e:
-            raise SystemExit(f"{r['path']} at {sha}: {e}") from None
+        text = git("show", f"{commit}:{r['path']}/meetko.toml")
+        plugins.append(bi.make_entry(meta, r["ref"] or ref, commit, facts(text, r["path"], owner, files), r["path"]))
     doc = {"generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "plugins": plugins}
     errs = bi.validate_index(doc)
     if errs:
         raise SystemExit("refusing to write an invalid index: " + "; ".join(errs))
     out.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return notes + [f"wrote {out.name}: {len(plugins)} plugin(s) at {sha}"]
+    return notes + [f"wrote {out.name}: {len(plugins)} plugin(s) at {commit}"]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--sha", help="write index.json for this repo's folders at this commit (must be pushed to main)")
-    ap.add_argument("--ref", default="main", help="the ref shown for entries without their own (default: main)")
+    ap.add_argument("--sha", help="check this commit and write index.json for this repo's folders at it (must be pushed to main)")
+    ap.add_argument("--ref", default="main", help="the ref shown for this repo's rows without their own (default: main)")
     ap.add_argument("--out", default=str(ROOT / "index.json"))
     a = ap.parse_args()
     try:
-        rows, errs = check()
+        commit = git("rev-parse", "--verify", f"{a.sha or 'HEAD'}^{{commit}}").strip()
+        rows, errs = check(commit)
+    except subprocess.CalledProcessError as e:
+        print(f"git: {e.stderr.strip() if e.stderr else e}", file=sys.stderr)
+        return 1
     except (bi.FetchFailed, ValueError) as e:
         print(f"sources.json: {e}", file=sys.stderr)
         return 1
@@ -138,9 +202,9 @@ def main() -> int:
     if errs:
         return 1
     if not a.sha:
-        print(f"ok: {len(rows)} listed", file=sys.stderr)
+        print(f"ok at {commit[:12]}: {len(rows)} listed", file=sys.stderr)
         return 0
-    for n in write(rows, a.sha, a.ref, Path(a.out)):
+    for n in write(rows, commit, a.ref, Path(a.out)):
         print(n, file=sys.stderr)
     return 0
 

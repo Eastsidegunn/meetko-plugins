@@ -10,8 +10,10 @@ carries `path`, so the app installs `github:OWNER/REPO/PATH@SHA`.
     python3.12 -I tools/plugin-index/build_index.py --out index.json [--sources sources.json] [--no-search]
                                                     [--previous index.json] [--blocklist blocklist.txt] [--allow-shrink]
 
-sources.json: {"plugins": [{"repo": "OWNER/REPO", "path": "FOLDER" (optional), "ref": "TAG" (optional)}, ...]}
-(other top-level keys, such as notes on unlisted folders, are ignored).
+sources.json: {"plugins": [{"repo": "OWNER/REPO", "path": "FOLDER" (optional), "ref": "TAG or COMMIT"}, ...]}
+(other top-level keys, such as notes on unlisted folders, are ignored). `ref` is required for every
+repository except the catalog's own (`--catalog`, default Eastsidegunn/meetko-plugins), whose rows may
+follow its latest release or default branch: a third-party row is pinned to what was reviewed in the PR.
 
 Stdlib only. Requires Python 3.11 or newer (tomllib); older versions stop with a message.
 `meetko.toml` is read from the tarball of the resolved commit, the same bytes `meetko plugin install`
@@ -603,8 +605,12 @@ def index_repo(gh: GitHub, repo: dict, path: str = "", ref: str | None = None) -
     return make_entry(repo, ref, sha, validate_manifest(text, owner), path)
 
 
-def load_sources(text: str) -> list[dict]:
+CATALOG = "Eastsidegunn/meetko-plugins"
+
+
+def load_sources(text: str, catalog: str = CATALOG) -> list[dict]:
     """The sources file: {"plugins": [{"repo": "OWNER/REPO", "path"?: "FOLDER", "ref"?: "TAG"}]}.
+    `ref` may be left out only for rows of the `catalog` repository itself.
     Raises FetchFailed for a malformed file (the run must not publish a list without it)."""
     try:
         doc = json.loads(text)
@@ -620,6 +626,8 @@ def load_sources(text: str) -> list[dict]:
         ok = ok and ("ref" not in r or (isinstance(r["ref"], str) and 0 < len(r["ref"]) <= 200 and not r["ref"].startswith(("pull/", "refs/", "-"))))
         if not ok:
             raise FetchFailed(f"sources plugins[{i}] is malformed (repo OWNER/REPO, optional path and ref)")
+        if "ref" not in r and r["repo"].lower() != catalog.lower():
+            raise FetchFailed(f"sources plugins[{i}] ({r['repo']}) needs a ref: a release tag or a commit sha (only {catalog}'s own rows may follow its default branch)")
         key = (r["repo"].lower(), r.get("path", ""))
         if key in seen:
             raise FetchFailed(f"sources plugins[{i}] repeats {r['repo']} {r.get('path', '')}")
@@ -692,12 +700,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--allow-shrink", action="store_true", help="accept an index with less than half of the previous plugins")
     ap.add_argument("--sources", help="sources.json: plugins listed by pull request (repo, optional path and ref)")
     ap.add_argument("--no-search", action="store_true", help="list only the sources file, not the meetko-plugin topic search")
+    ap.add_argument("--catalog", default=CATALOG, help="OWNER/REPO whose own sources rows may leave out ref")
     args = ap.parse_args(argv)
     try:
         sources = None
         if args.sources:
             with open(args.sources, encoding="utf-8") as f:
-                sources = load_sources(f.read())
+                sources = load_sources(f.read(), args.catalog)
         doc, notes = build(GitHub(os.environ.get("GITHUB_TOKEN") or None), sources=sources, search=not args.no_search)
     except FetchFailed as e:
         print(f"failed, nothing written: {e}", file=sys.stderr)
