@@ -1,4 +1,51 @@
 {
-  "generated": "2026-11-11T14:46:52Z",
-  "plugins": []
+  "generated": "2026-11-11T16:02:23Z",
+  "plugins": [
+    {
+      "id": "eastsidegunn/action-items-py",
+      "name": "action-items-py",
+      "version": "0.1.0",
+      "description": "규칙 기반 액션아이템과 결정사항 표시",
+      "repo": "Eastsidegunn/meetko-plugins",
+      "ref": "main",
+      "sha": "7d9bd65a6a7bcd9df751f06d18527bb97067ad36",
+      "permissions": {
+        "network": false,
+        "audio": false
+      },
+      "runtime": "python",
+      "license": "AGPL-3.0-or-later",
+      "stars": 0,
+      "updated": "",
+      "path": "action-items-py"
+    },
+    {
+      "id": "eastsidegunn/summary-py",
+      "name": "summary-py",
+      "version": "0.1.0",
+      "description": "회의 내용을 AI로 요약하고 할 일과 결정 사항을 뽑아줘요 (대화 텍스트가 선택한 AI 서비스로 전송돼요)",
+      "repo": "Eastsidegunn/meetko-plugins",
+      "ref": "main",
+      "sha": "7d9bd65a6a7bcd9df751f06d18527bb97067ad36",
+      "permissions": {
+        "network": true,
+        "audio": false,
+        "secrets": [
+          "ANTHROPIC_API_KEY",
+          "OPENAI_API_KEY"
+        ],
+        "settings": [
+          "ANTHROPIC_MODEL",
+          "ANTHROPIC_BASE_URL",
+          "OPENAI_BASE_URL",
+          "OPENAI_MODEL"
+        ]
+      },
+      "runtime": "python",
+      "license": "AGPL-3.0-or-later",
+      "stars": 0,
+      "updated": "",
+      "path": "summary-py"
+    }
+  ]
 }
