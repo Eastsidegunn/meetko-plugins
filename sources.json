@@ -1,0 +1,9 @@
+{
+  "plugins": [
+    {"repo": "Eastsidegunn/meetko-plugins", "path": "action-items-py"},
+    {"repo": "Eastsidegunn/meetko-plugins", "path": "summary-py"}
+  ],
+  "unlisted": {
+    "talk-time-rs": "a compiled plugin: meetko never builds at install, so it is installed from a local folder after cargo build --release --locked"
+  }
+}

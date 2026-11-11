@@ -1,5 +1,5 @@
 [package]
-id = "meetko/action-items-py"
+id = "eastsidegunn/action-items-py"
 version = "0.1.0"
 kind = "plugin"
 contract = "0.1"

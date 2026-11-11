@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""Write index.json (the list meetko's plugin browser reads) from the plugin folders here.
+"""Check sources.json and this repo's plugin folders, or write index.json for them offline.
 
-    python3.11 -I tools/make-index            # writes index.json at the repo root
-    python3.11 -I tools/make-index --check    # exit 1 if index.json differs (ignores "generated")
+    python3.12 -I tools/make-index                 # check (what a listing PR must pass); writes nothing
+    python3.12 -I tools/make-index --sha COMMIT    # write index.json for this repo's folders at COMMIT
 
-Each top-level folder with a meetko.toml is a plugin. The manifest gives the id, name, version,
-description, license, runtime and declared permissions. Where the plugin is downloaded from is NOT
-in the manifest: meetko installs `github:OWNER/REPO@REF`, takes `meetko.toml` from the ROOT of that
-repository at a pinned 40-character commit sha, and requires the id's publisher part to equal OWNER.
-So a plugin gets an index entry only when `sources.json` names its published repository:
+sources.json lists what the app's browser shows: {"plugins": [{"repo": "OWNER/REPO", "path": "FOLDER"
+(optional), "ref": "TAG" (optional)}], "unlisted": {"FOLDER": "why"}}. The normal way index.json is made is
+the GitHub workflow (.github/workflows/index.yml), which runs tools/build_index.py against GitHub and pins
+every entry, including other people's repositories, to a commit. This script needs no network:
 
-    {"summary-py": {"repo": "OWNER/REPO", "ref": "v0.1.0", "sha": "<40 hex>", "updated": ""}}
+- check: every row is well formed (the same rules as tools/build_index.py and the app); every row for this
+  repository names a folder whose meetko.toml passes the same manifest checks, whose id publisher is the
+  repo owner, and whose command needs no build; every plugin folder here is either listed or in "unlisted".
+- --sha: index entries for this repository's rows, with manifests read from COMMIT (`git show`, the bytes
+  the archive of that commit holds; there is no .gitattributes export-subst here). COMMIT must be on the
+  GitHub default branch before the index is published, or installs are refused. Rows for other
+  repositories are kept from the current index.json (the workflow makes them).
 
-Plugins without a source, or whose source would be refused at install, are skipped with a reason.
-Stdlib only; Python 3.11 or newer (tomllib). Nothing here touches the network.
+Stdlib only; Python 3.11 or newer (tomllib, via tools/build_index.py, a copy of meetko's
+tools/plugin-index/build_index.py).
 """
 
 from __future__ import annotations
@@ -25,122 +30,118 @@ if sys.version_info < (3, 11):
 
 import argparse
 import json
-import re
-import tomllib
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ID_RE = re.compile(r"^([a-z0-9][a-z0-9_.-]{0,63})/([a-z0-9][a-z0-9_.-]{0,63})$")
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?$")
-SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}$")
+sys.path.insert(0, str(ROOT / "tools"))  # -I drops the script dir from sys.path
+
+import build_index as bi  # noqa: E402
+
+THIS_REPO = "Eastsidegunn/meetko-plugins"
 
 
-class Skip(Exception):
-    pass
+def local(row: dict) -> bool:
+    return row["repo"].lower() == THIS_REPO.lower()
 
 
-def runtime(command: list[str]) -> str:
-    prog = command[0].replace("\\", "/")
+def facts(text: str, folder: str, owner: str, at: str | None = None) -> dict:
+    """Manifest facts; a command path must be a file Git tracks (in the index, or at commit `at`):
+    a build output that is only on this disk is not in the archive users install."""
+    f = bi.validate_manifest(text, owner)
+    command = bi.tomllib.loads(text)["run"]["command"]
+    prog = (command if isinstance(command, list) else [command])[0].replace("\\", "/")
     if "/" in prog:
-        return "binary"
-    name = prog.lower()
-    if name.startswith("python"):
-        return "python"
-    if name in ("node", "deno", "bun"):
-        return "node"
-    if name in ("sh", "bash", "zsh"):
-        return "shell"
-    return name[:32]
+        path = f"{folder}/{prog}"
+        tracked = git("ls-tree", "--name-only", at, path) if at else git("ls-files", "--", path)
+        if not tracked.strip():
+            raise bi.Rejected(f"run.command {prog!r} is not a committed file: a compiled plugin must commit its binary (meetko never builds at install)")
+    return f
 
 
-def facts(dir: Path) -> dict:
-    m = tomllib.loads((dir / "meetko.toml").read_text(encoding="utf-8"))
-    pkg, run = m.get("package", {}), m.get("run", {})
-    pid, version = pkg.get("id", ""), pkg.get("version", "")
-    if not ID_RE.match(pid):
-        raise Skip(f"package.id {pid!r} is not publisher/name")
-    if not VERSION_RE.match(version):
-        raise Skip(f"package.version {version!r} is not semver")
-    if not pkg.get("description"):
-        raise Skip("package.description is required")
-    command = run.get("command")
-    command = [command] if isinstance(command, str) else command
-    if not command:
-        raise Skip("run.command is missing")
-    if "/" in command[0] and not (dir / command[0]).is_file():
-        # meetko never builds at install time: a compiled plugin must commit its binary
-        raise Skip(f"run.command {command[0]!r} is not in the folder (a compiled plugin must commit its built binary)")
-    perm = m.get("permissions", {})
-    permissions = {"network": bool(perm.get("network", False)), "audio": m.get("input", {}).get("audio", "none") == "full"}
-    for k in ("secrets", "settings"):
-        if perm.get(k):
-            permissions[k] = list(perm[k])
-    return {
-        "id": pid,
-        "name": pid.split("/", 1)[1],
-        "version": version,
-        "description": pkg["description"].strip(),
-        "permissions": permissions,
-        "runtime": runtime(command),
-        "license": pkg.get("license", ""),
-        "homepage": pkg.get("homepage", ""),
-    }
-
-
-def entry(name: str, f: dict, src: dict | None) -> dict:
-    if not src:
-        raise Skip("no published repository in sources.json (meetko installs a plugin from the root of its own repo)")
-    repo, ref, sha = src.get("repo", ""), src.get("ref", ""), src.get("sha", "")
-    if not REPO_RE.match(repo) or not SHA_RE.match(sha) or not ref:
-        raise Skip("sources.json needs repo OWNER/REPO, ref and a 40-character commit sha")
-    owner = repo.split("/")[0].lower()
-    if f["id"].split("/")[0] != owner:
-        raise Skip(f"id {f['id']!r}: the publisher part must be the repo owner {owner!r}, or install from GitHub is refused")
-    e = {
-        "id": f["id"], "name": f["name"], "version": f["version"], "description": f["description"],
-        "repo": repo, "ref": ref, "sha": sha, "permissions": f["permissions"], "runtime": f["runtime"],
-        "license": f["license"], "stars": 0, "updated": src.get("updated", ""),
-    }
-    if f["homepage"].startswith("https://"):
-        e["homepage"] = f["homepage"]
-    return e
-
-
-def build() -> tuple[dict, list[str]]:
-    sources_path = ROOT / "sources.json"
-    sources = json.loads(sources_path.read_text(encoding="utf-8")) if sources_path.exists() else {}
-    plugins, notes, seen = [], [], set()
-    for dir in sorted(p for p in ROOT.iterdir() if (p / "meetko.toml").is_file()):
+def check() -> tuple[list[dict], list[str]]:
+    doc = json.loads((ROOT / "sources.json").read_text(encoding="utf-8"))
+    rows = bi.load_sources(json.dumps({"plugins": doc.get("plugins")}))
+    unlisted = doc.get("unlisted", {})
+    if not isinstance(unlisted, dict) or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in unlisted.items()):
+        raise bi.FetchFailed('"unlisted" must map a folder name to the reason it is not listed')
+    errs = []
+    for r in rows:
+        if not local(r):
+            continue
+        if not r["path"]:
+            errs.append(f"{r['repo']}: the repository root is not a plugin; name a folder")
+            continue
+        folder = ROOT / r["path"]
         try:
-            e = entry(dir.name, facts(dir), sources.get(dir.name))
-            if e["id"] in seen:
-                raise Skip(f"id {e['id']} is listed twice")
-            seen.add(e["id"])
-            plugins.append(e)
-        except Skip as why:
-            notes.append(f"skip {dir.name}: {why}")
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return {"generated": stamp, "plugins": plugins}, notes
+            facts((folder / "meetko.toml").read_text(encoding="utf-8"), r["path"], THIS_REPO.split("/")[0])
+        except FileNotFoundError:
+            errs.append(f"{r['path']}: no meetko.toml")
+        except bi.Rejected as e:
+            errs.append(f"{r['path']}: {e}")
+    listed = {r["path"] for r in rows if local(r)}
+    for d in sorted(p for p in ROOT.iterdir() if (p / "meetko.toml").is_file()):
+        if d.name in listed and d.name in unlisted:
+            errs.append(f"{d.name}: both listed and unlisted")
+        elif d.name not in listed and d.name not in unlisted:
+            errs.append(f"{d.name}: a plugin folder that is neither in sources.json plugins nor in unlisted")
+    return rows, errs
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", "-C", str(ROOT), *args], check=True, capture_output=True, text=True).stdout
+
+
+def write(rows: list[dict], sha: str, ref: str, out: Path) -> list[str]:
+    sha = git("rev-parse", "--verify", f"{sha}^{{commit}}").strip()
+    if git("ls-tree", "--name-only", sha, ".gitattributes").strip():
+        raise SystemExit(".gitattributes exists at that commit: export-subst could change the archive; use the workflow")
+    owner = THIS_REPO.split("/")[0]
+    meta = {"full_name": THIS_REPO, "stargazers_count": 0, "pushed_at": ""}
+    old = json.loads(out.read_text(encoding="utf-8")).get("plugins", []) if out.exists() else []
+    plugins, notes = [], []
+    for r in rows:
+        if not local(r):
+            kept = [p for p in old if p["repo"].lower() == r["repo"].lower() and p.get("path", "") == r["path"]]
+            plugins += kept
+            notes.append(f"{bi.where(r)}: {'kept from the current index' if kept else 'not in the current index; the workflow adds it'}")
+            continue
+        try:
+            text = git("show", f"{sha}:{r['path']}/meetko.toml")
+            plugins.append(bi.make_entry(meta, r["ref"] or ref, sha, facts(text, r["path"], owner, sha), r["path"]))
+        except subprocess.CalledProcessError:
+            raise SystemExit(f"{r['path']}: no meetko.toml at {sha}") from None
+        except bi.Rejected as e:
+            raise SystemExit(f"{r['path']} at {sha}: {e}") from None
+    doc = {"generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "plugins": plugins}
+    errs = bi.validate_index(doc)
+    if errs:
+        raise SystemExit("refusing to write an invalid index: " + "; ".join(errs))
+    out.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return notes + [f"wrote {out.name}: {len(plugins)} plugin(s) at {sha}"]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--sha", help="write index.json for this repo's folders at this commit (must be pushed to main)")
+    ap.add_argument("--ref", default="main", help="the ref shown for entries without their own (default: main)")
     ap.add_argument("--out", default=str(ROOT / "index.json"))
-    ap.add_argument("--check", action="store_true", help="compare with --out instead of writing it")
     a = ap.parse_args()
-    doc, notes = build()
-    for n in notes:
+    try:
+        rows, errs = check()
+    except (bi.FetchFailed, ValueError) as e:
+        print(f"sources.json: {e}", file=sys.stderr)
+        return 1
+    for e in errs:
+        print(f"error: {e}", file=sys.stderr)
+    if errs:
+        return 1
+    if not a.sha:
+        print(f"ok: {len(rows)} listed", file=sys.stderr)
+        return 0
+    for n in write(rows, a.sha, a.ref, Path(a.out)):
         print(n, file=sys.stderr)
-    out = Path(a.out)
-    if a.check:
-        old = json.loads(out.read_text(encoding="utf-8"))
-        same = old.get("plugins") == doc["plugins"]
-        print("index.json is up to date" if same else "index.json is out of date: run tools/make-index", file=sys.stderr)
-        return 0 if same else 1
-    out.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {out.name}: {len(doc['plugins'])} plugin(s)", file=sys.stderr)
     return 0
 
 

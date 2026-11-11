@@ -6,7 +6,7 @@ import json
 import re
 import sys
 
-PLUGIN = {"id": "meetko/action-items-py", "version": "0.1.0"}
+PLUGIN = {"id": "eastsidegunn/action-items-py", "version": "0.1.0"}
 ACTION = re.compile(r"담당|하겠습니다|할게요|action\s*item|액션\s*아이템|review|리뷰", re.I)
 DECISION = re.compile(r"결정|decid", re.I)
 

@@ -9,7 +9,7 @@ import llm
 from llm import PluginError
 from templates import pick_template
 
-PLUGIN = {"id": "meetko/summary-py", "version": "0.1.0"}
+PLUGIN = {"id": "eastsidegunn/summary-py", "version": "0.1.0"}
 
 # Tunables (tests patch these).
 MARGIN_SECS = 8.0                 # deadline: see budget_secs (startup, reply and the host's own checks)

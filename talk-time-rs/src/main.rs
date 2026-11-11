@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 
-const ID: &str = "meetko/talk-time-rs";
+const ID: &str = "eastsidegunn/talk-time-rs";
 const VERSION: &str = "0.1.0";
 
 fn run(md: &Value) -> Result<Value, String> {

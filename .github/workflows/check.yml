@@ -1,0 +1,28 @@
+# Checks a pull request: sources.json rows and this repo's plugin folders (tools/make-index, no network)
+# and the summary-py tests. It does not build the index; .github/workflows/index.yml does that on main.
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: sources.json and plugin folders
+        run: python -I tools/make-index
+      - name: summary-py tests (no network)
+        run: python -I summary-py/test_summary.py

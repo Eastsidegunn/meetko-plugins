@@ -84,7 +84,7 @@ def load_config(secrets, settings):
         return Config("openai", base, ok, _get(settings, "OPENAI_MODEL") or DEFAULT_OPENAI_MODEL)
     raise PluginError(
         "AI 서비스 키가 없어요. 플러그인 화면에서 \"API 키 넣기\"로 ANTHROPIC_API_KEY (또는 OPENAI_API_KEY / OPENAI_BASE_URL)를 넣어 주세요. "
-        "명령줄: meetko plugin secret set meetko/summary-py ANTHROPIC_API_KEY "
+        "명령줄: meetko plugin secret set eastsidegunn/summary-py ANTHROPIC_API_KEY "
         "(No API key is set. Set ANTHROPIC_API_KEY or OPENAI_* for this plugin.)")
 
 

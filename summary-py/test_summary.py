@@ -278,7 +278,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(rep["error"]["code"], -32010)
         self.assertIn("ANTHROPIC_API_KEY", rep["error"]["message"])
         self.assertIn("API 키 넣기", rep["error"]["message"])
-        self.assertIn("meetko plugin secret set meetko/summary-py", rep["error"]["message"])
+        self.assertIn("meetko plugin secret set eastsidegunn/summary-py", rep["error"]["message"])
 
     def test_401(self):
         fake = Fake(lambda p, h, b: (401, {"error": {"message": "invalid x-api-key " + KEY}}, None))
